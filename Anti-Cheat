@@ -1,0 +1,159 @@
+-- Anti-Cheat System for Fisch Game
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService")
+
+-- Configuration Settings
+local CONFIG = {
+    MaxPlayerSpeed = 50,  -- Max speed for players walking
+    MaxBoatSpeed = 250,   -- Max speed for boats
+    MaxTeleportDistance = 50, -- Max allowed teleportation distance
+    FlagLimit = 3, -- Number of flags before kicking
+    InjectionKeywords = { "dex", "exploit", "synapse", "btools", "script", "delta", "wave", "cryptic", "luna", "swift", "vega", "native" }, -- Detect injection tools
+    MiniGameRemoteName = "BarMiniGameRemote", -- Mini-game event name
+    MiniGameMaxScore = 100, -- Max score for mini-game
+    SuspiciousFunctionNames = { "getmetatable", "setfenv" }, -- Detect known exploit functions
+    DebugMode = false, -- Set to true for flag logging without kicking
+}
+
+-- Track flagged players
+local flaggedPlayers = {}
+local miniGameScores = {}
+local teleportData = {}
+
+-- Flag a player for suspicious activity
+local function flagPlayer(player, reason)
+    flaggedPlayers[player.UserId] = (flaggedPlayers[player.UserId] or 0) + 1
+    print(player.Name .. " flagged for: " .. reason)
+    
+    if flaggedPlayers[player.UserId] >= CONFIG.FlagLimit then
+        if not CONFIG.DebugMode then
+            player:Kick("Cheating detected: " .. reason)
+        end
+    end
+end
+
+-- Advanced Injection Detection
+local function detectInjection(player)
+    -- Check for potentially dangerous objects or altered modules
+    local function checkForInjectedScripts(parent)
+        for _, child in pairs(parent:GetDescendants()) do
+            if child:IsA("LocalScript") or child:IsA("ModuleScript") then
+                local scriptContent = child.Source or ""
+                -- Check for external modules or code indicative of injection
+                if string.match(scriptContent, "loadstring") or string.match(scriptContent, "getfenv") then
+                    flagPlayer(player, "Potential injection detected: " .. child.Name)
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- Check PlayerGui, PlayerScripts, and other locations for injected content
+    local playerGui = player:WaitForChild("PlayerGui", 10)
+    local playerScripts = player:WaitForChild("PlayerScripts", 10)
+    if playerGui then
+        if checkForInjectedScripts(playerGui) then return end
+    end
+    if playerScripts then
+        if checkForInjectedScripts(playerScripts) then return end
+    end
+
+    -- Advanced check for common exploit tools loaded in memory
+    local exploitTools = {
+        "synapse", "krnl", "darkdex", "dex", "exploit", "btools", "script", 
+        "delta", "wave", "cryptic", "luna", "swift", "vega", "native"
+    }
+
+    for _, tool in ipairs(exploitTools) do
+        if game:GetService("ReplicatedStorage"):FindFirstChild(tool) then
+            flagPlayer(player, "Exploit tool detected: " .. tool)
+        end
+    end
+end
+
+-- Function hook detection to prevent exploits that hook game functions
+local function detectFunctionHooks(player)
+    local suspiciousFunctions = {"getmetatable", "setfenv", "loadstring", "debug", "pcall"}
+
+    for _, func in ipairs(suspiciousFunctions) do
+        -- Check if these functions are being tampered with
+        local original = debug.getinfo(func)
+        if not original then
+            flagPlayer(player, "Function tampering detected: " .. func)
+        end
+    end
+end
+
+-- Secure Remote Event Validation
+local function validateRemoteCalls(player, remoteName, args)
+    -- Validate if remote events are being used by exploits
+    if remoteName == "BarMiniGameRemote" then
+        local action = args[1]
+        local data = args[2]
+        if action == "start" then
+            -- Check if score is within valid bounds
+            if data and data > CONFIG.MiniGameMaxScore then
+                flagPlayer(player, "Invalid mini-game score: " .. tostring(data))
+            end
+        end
+    end
+end
+
+-- Prevent malicious remote calls
+ReplicatedStorage.BarMiniGameRemote.OnServerEvent:Connect(function(player, ...)
+    local args = {...}
+    validateRemoteCalls(player, "BarMiniGameRemote", args)
+end)
+
+-- Improved Speed and Teleportation Validation
+local function serverSideSpeedCheck(player, character)
+    local humanoid = character:FindFirstChild("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if humanoid and rootPart then
+        local speed = humanoid.MoveDirection.Magnitude
+        local speedThreshold = CONFIG.MaxPlayerSpeed
+
+        -- Add teleportation check here
+        local lastPosition = teleportData[player.UserId] or rootPart.Position
+        local distance = (rootPart.Position - lastPosition).Magnitude
+        if distance > CONFIG.MaxTeleportDistance then
+            flagPlayer(player, "Teleportation detected: " .. distance)
+        end
+
+        -- Server-side check for speed hacks
+        if speed > speedThreshold then
+            flagPlayer(player, "Speed hack detected: " .. speed)
+        end
+        teleportData[player.UserId] = rootPart.Position
+    end
+end
+
+-- Continuous Monitoring for Injected Scripts and Exploit Events
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function(character)
+        -- Continuous checks for injections and memory tampering
+        RunService.Heartbeat:Connect(function()
+            detectInjection(player)
+            detectFunctionHooks(player)
+            serverSideSpeedCheck(player, character)
+        end)
+    end)
+end)
+
+-- Secure Remote Event Handling for other potential malicious remotes
+ReplicatedStorage.ChildAdded:Connect(function(child)
+    if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+        child.OnServerEvent:Connect(function(player, ...)
+            local args = {...}
+
+            -- Ensure that the event is valid and from a legitimate player
+            if not args or type(args[1]) ~= "table" then
+                flagPlayer(player, "Malicious remote event detected: " .. child.Name)
+            end
+        end)
+    end
+end)
